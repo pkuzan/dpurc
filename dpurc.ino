@@ -25,9 +25,10 @@
 #define STATE_STANDBY 1
 #define STATE_COMPUTER_STARTING 2
 #define STATE_HW_STARTING 3
-#define STATE_RUNNING 4
-#define STATE_COMPUTER_STOPPRING 5
-#define STATE_WAIT_FOR_PSU 6
+#define STATE_RUNNING_AUDIO_ON 4
+#define STATE_RUNNING_AUDIO_OFF 5
+#define STATE_COMPUTER_STOPPRING 6
+#define STATE_WAIT_FOR_PSU 7
 
 #define STATE_LED_OFF 1
 #define STATE_LED_ON 2
@@ -40,6 +41,9 @@
 
 //Single momentory push-button for on and off
 const int onOffSwitchPin = 1;
+
+//Connected to headphone jack, break = audio on, make = audio off.
+const int auxPin = 4;
 
 //Uses USB bus power to detect when Mac has actually started and shutdown
 //Logic is inverted by opto-isolator
@@ -71,9 +75,11 @@ unsigned long previousMillis = 0;
 bool ledFlashState;
 
 Bounce onOffSwitch = Bounce();
+Bounce auxSwitch = Bounce();
 
 volatile byte state;
 volatile byte ledState;
+volatile byte audioState;
 
 bool justTransitioned = false;
 bool ledStateJustTransitioned = false;
@@ -92,8 +98,10 @@ void setup() {
 #ifdef DEBUG
   Serial.begin(9600);
 #endif
+  pinMode(auxPin, INPUT_PULLUP);
+  auxSwitch.attach(auxPin);
 
-  pinMode( onOffSwitchPin, INPUT_PULLUP);
+  pinMode(onOffSwitchPin, INPUT_PULLUP);
   onOffSwitch.attach(onOffSwitchPin);
 
   pinMode(audioPowerPin, OUTPUT);
@@ -183,17 +191,24 @@ void doStateMachine() {
           justTransitioned = false;
         }
         if (digitalRead(audioOnOffPin) == LOW) {
-          switchOnAudio();
-          transitionTo(STATE_RUNNING);
+
+          transitionLEDState(STATE_LED_OFF);
+
+          auxSwitch.update();
+          if (auxSwitch.read()) {
+            transitionTo(STATE_RUNNING_AUDIO_ON);
+          } else {
+            transitionTo(STATE_RUNNING_AUDIO_OFF);
+          }
         }
         break;
       }
 
-    case STATE_RUNNING: {
+    case STATE_RUNNING_AUDIO_ON: {
         if (justTransitioned) {
-          DEBUG_PRINT("Hauptwerk Started\n");
+          DEBUG_PRINT("Hauptwerk Running - Audio ON\n");
 
-          transitionLEDState(STATE_LED_OFF);
+          switchOnAudio();
 
           justTransitioned = false;
         }
@@ -201,11 +216,34 @@ void doStateMachine() {
         if (switchState == SWITCH_PRESS_SHORT) {
           DEBUG_PRINT("Button pressed\n");
           switchState = SWITCH_NONE;
-          transitionLEDState(STATE_LED_FLASH_FAST);
-          switchOffAudio();
-          sendShutdownMIDI();
-
           transitionTo(STATE_COMPUTER_STOPPRING);
+        } else {
+          auxSwitch.read();
+          if (auxSwitch.fell()) {
+            transitionTo(STATE_RUNNING_AUDIO_OFF);
+          }
+        }
+        break;
+      }
+
+    case STATE_RUNNING_AUDIO_OFF: {
+        if (justTransitioned) {
+          DEBUG_PRINT("Hauptwerk Running - Audio OFF\n");
+
+          switchOffAudio();
+
+          justTransitioned = false;
+        }
+
+        if (switchState == SWITCH_PRESS_SHORT) {
+          DEBUG_PRINT("Button pressed\n");
+          switchState = SWITCH_NONE;
+          transitionTo(STATE_COMPUTER_STOPPRING);
+        } else {
+          auxSwitch.read();
+          if (auxSwitch.rose()) {
+            transitionTo(STATE_RUNNING_AUDIO_ON);
+          }
         }
         break;
       }
@@ -213,6 +251,10 @@ void doStateMachine() {
     case STATE_COMPUTER_STOPPRING: {
         if (justTransitioned) {
           DEBUG_PRINT("Computer Stopping\n");
+
+          transitionLEDState(STATE_LED_FLASH_FAST);
+          switchOffAudio();
+          sendShutdownMIDI();
 
           justTransitioned = false;
         }
@@ -311,7 +353,7 @@ void transitionLEDState(byte newLEDState) {
   ledStateJustTransitioned = true;
   ledState = newLEDState;
 }
- 
+
 void transitionTo(byte newState) {
   justTransitioned = true;
   state = newState;
